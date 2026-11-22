@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f0b13">
+  <meta name="description" content="SongGuess — a two-player Beatles song guessing duel. Hear 1, 2, 8 then 15 seconds and name the tune before your opponent does.">
+  <title>SongGuess — a two-player Beatles duel</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='46' fill='%230f0b13'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%23f4b544' stroke-width='2' opacity='.55'/%3E%3Ccircle cx='50' cy='50' r='14' fill='%23f4b544'/%3E%3Ccircle cx='50' cy='50' r='3' fill='%230f0b13'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Abril+Fatface&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">♪</span>
+        <span class="brand__name">Song<em>Guess</em></span>
+      </div>
+      <button id="soundToggle" class="icon-btn" type="button" aria-label="Mute sound"></button>
+    </header>
+
+    <main id="screen" class="screen" aria-live="polite"></main>
+
+    <footer class="footer">Five rounds · Two players · Clips from Apple Music</footer>
+  </div>
+
+  <audio id="player" preload="auto"></audio>
+
+  <noscript>
+    <p style="padding:2rem;text-align:center;color:#f6efe3">SongGuess needs JavaScript enabled to play.</p>
+  </noscript>
+
+  <script src="songs.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
