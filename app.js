@@ -1,15 +1,19 @@
 /* SongGuess — a two-player Beatles listening duel.
-   Round flow: each player hears 0.1s → 0.5s → 2s → 15s of their own song from
-   the round's difficulty tier. Guess at any point; the shorter the clip,
-   the more points. Songs live in songs.js. */
+   Round flow: each player hears 0.25s → 0.5s → 2s → 15s from the start of
+   their own song, drawn from the round's difficulty tier. Guess at any point;
+   the shorter the clip, the more points. Songs live in songs.js. */
 (function () {
   'use strict';
 
   // ───────────────────────────── game rules ─────────────────────────────
-  const CLIP_LENGTHS = [0.1, 0.5, 2, 15];
-  const LABELS = ['0.1 seconds', '0.5 seconds', '2 seconds', '15 seconds'];
+  const CLIP_LENGTHS = [0.25, 0.5, 2, 15];
+  const LABELS = ['0.25 seconds', '0.5 seconds', '2 seconds', '15 seconds'];
   const POINTS = [5, 3, 2, 1];
   const ROUNDS = 5;
+
+  // Deezer's preview links are signed and expire about 15 minutes after
+  // they’re issued, so each one is fetched fresh and reused for a while.
+  const PREVIEW_TTL = 9 * 60 * 1000;
 
   // Extra accepted answers for titles people type differently.
   const TITLE_ALIASES = {
@@ -201,12 +205,70 @@
     return round.songs[state.turn] || null;
   }
 
+  function freshPreview(song) {
+    if (!song || !song.preview) return null;
+    if (!song.previewAt || Date.now() - song.previewAt > PREVIEW_TTL) return null;
+    return song.preview;
+  }
+
+  // A Deezer preview URL, fetched once per song and reused until it ages out.
+  function resolvePreview(song) {
+    if (!song) return Promise.resolve(null);
+    const cached = freshPreview(song);
+    if (cached) return Promise.resolve(cached);
+    if (song.previewPromise) return song.previewPromise;
+    const lookup = song.deezerId
+      ? deezerJsonp('https://api.deezer.com/track/' + song.deezerId)
+      : Promise.resolve(null);
+    song.previewPromise = lookup.then(function (track) {
+      if (track && track.preview) return track.preview;
+      // The stored id may be stale — fall back to a title search.
+      const q = 'artist:"The Beatles" track:"' + String(song.title).replace(/["\\]/g, '') + '"';
+      return deezerJsonp('https://api.deezer.com/search?q=' + encodeURIComponent(q) + '&limit=10')
+        .then(function (res) {
+          const wanted = coreTitle(song.title);
+          const hit = ((res && res.data) || []).find(function (r) {
+            return r && r.preview && r.artist && r.artist.name === 'The Beatles' &&
+              coreTitle(r.title) === wanted;
+          });
+          return hit ? hit.preview : null;
+        });
+    }).then(function (url) {
+      song.previewPromise = null;
+      if (url) {
+        song.preview = url;
+        song.previewAt = Date.now();
+      }
+      return url || null;
+    }, function () {
+      song.previewPromise = null;
+      return null;
+    });
+    return song.previewPromise;
+  }
+
+  // Warm up every song in the game so the first press of play is instant.
+  function prefetchPreviews(rounds) {
+    (rounds || []).forEach(function (round) {
+      round.songs.forEach(function (song) { if (song) resolvePreview(song); });
+    });
+  }
+
   function loadSong(song) {
     if (!song) return;
-    if (state.loadedSong === song) return;
+    const url = freshPreview(song);
+    if (state.loadedSong === song && (!url || audio.getAttribute('src') === url)) return;
     state.loadedSong = song;
-    audio.src = song.preview;
-    audio.load();
+    if (url) {
+      audio.src = url;
+      audio.load();
+      return;
+    }
+    resolvePreview(song).then(function (fresh) {
+      if (!fresh || state.loadedSong !== song) return;
+      audio.src = fresh;
+      audio.load();
+    });
   }
 
   function setProgress(pct) {
@@ -234,7 +296,21 @@
     }
     const song = currentSong();
     if (!song) return;
-    loadSong(song);
+    let url = freshPreview(song);
+    if (!url) {
+      setHint('Loading the clip…');
+      url = await resolvePreview(song);
+      if (!url) {
+        setHint('Couldn’t load the clip. Check your connection, then press play.', true);
+        return;
+      }
+      if (state.phase !== 'turn' || currentSong() !== song) return;
+    }
+    if (audio.getAttribute('src') !== url) {
+      audio.src = url;
+      audio.load();
+    }
+    state.loadedSong = song;
     audio.muted = state.muted;
     audio.volume = state.volume;
     try { audio.currentTime = 0; } catch (e) { /* not ready yet */ }
@@ -291,11 +367,12 @@
     const song = state.loadedSong;
     refreshing = true;
     setHint('Clip didn’t load — reconnecting…', true);
-    const url = await itunesLookup(song.title);
+    song.preview = null;
+    song.previewAt = 0;
+    const url = await resolvePreview(song);
     refreshing = false;
     if (state.phase !== 'turn' || currentSong() !== song) return;
     if (url) {
-      song.preview = url;
       state.loadedSong = null;
       loadSong(song);
       setHint('Reconnected. Press play again.');
@@ -304,8 +381,8 @@
     }
   });
 
-  // Refresh an expired preview URL via the public iTunes search API (JSONP).
-  function itunesLookup(title) {
+  // Deezer's API has no CORS headers, so requests come back as JSONP.
+  function deezerJsonp(url) {
     return new Promise(function (resolve) {
       const cb = '__sgCb' + Math.random().toString(36).slice(2);
       const script = document.createElement('script');
@@ -317,22 +394,9 @@
         script.remove();
         resolve(val || null);
       };
-      window[cb] = function (data) {
-        try {
-          const results = (data && data.results) || [];
-          const wanted = coreTitle(title);
-          const hit = results.find(function (r) {
-            return r && r.artistName === 'The Beatles' && coreTitle(r.trackName) === wanted;
-          });
-          finish(hit ? hit.previewUrl : null);
-        } catch (e) {
-          finish(null);
-        }
-      };
+      window[cb] = function (data) { finish(data && !data.error ? data : null); };
       script.onerror = function () { finish(null); };
-      script.src = 'https://itunes.apple.com/search?term=' +
-        encodeURIComponent(title + ' The Beatles') +
-        '&entity=song&limit=15&country=US&callback=' + cb;
+      script.src = url + (url.indexOf('?') < 0 ? '?' : '&') + 'output=jsonp&callback=' + cb;
       document.head.appendChild(script);
       setTimeout(function () { finish(null); }, 8000);
     });
@@ -379,6 +443,7 @@
     state.players = [{ name: state.names[0] }, { name: state.names[1] }];
     state.scores = [0, 0];
     state.rounds = buildRounds(tiers);
+    prefetchPreviews(state.rounds);
     state.roundIndex = 0;
     state.turn = 0;
     state.last = null;
@@ -424,7 +489,7 @@
     }
   }
 
-  // Move up one rung of the listen ladder (0.1s → 0.5s → 2s → 15s).
+  // Move up one rung of the listen ladder (0.25s → 0.5s → 2s → 15s).
   function advanceStage(lead) {
     state.stage += 1;
     state.heard = false;
@@ -537,7 +602,7 @@
       '<section class="card setup anim">' +
         '<p class="eyebrow">A two-player listening duel</p>' +
         '<h1 class="hero-title">Name that <br><span>Beatles song</span></h1>' +
-        '<p class="lede">A tenth of a second. Half a second. Two seconds. Fifteen. ' +
+        '<p class="lede">A quarter of a second. Half a second. Two seconds. Fifteen. ' +
           'Guess as early as you can — each round, both players get their own song, ' +
           'drawn from the same difficulty tier.</p>' +
         '<form id="setupForm" class="setup-form">' +
@@ -548,7 +613,7 @@
               '<input id="name2" maxlength="18" autocomplete="off" spellcheck="false" value="' + esc(state.names[1]) + '"></label>' +
           '</div>' +
           '<ol class="rules">' +
-            '<li><b>0.1s</b><span>A tenth of a second — 5 points</span></li>' +
+            '<li><b>0.25s</b><span>A quarter of a second — 5 points</span></li>' +
             '<li><b>0.5s</b><span>Miss it, hear half a second — 3 points</span></li>' +
             '<li><b>2s</b><span>Then two seconds — 2 points</span></li>' +
             '<li><b>15s</b><span>Then fifteen — 1 point</span></li>' +
@@ -556,7 +621,7 @@
           '<button type="submit" class="btn btn--primary btn--lg">Start the duel</button>' +
         '</form>' +
         '<p class="fineprint">Five rounds of rising difficulty · highest score wins · ' +
-          'clips are official previews from Apple Music, so an internet connection is required.</p>' +
+          'clips are the first 30 seconds of each song, streamed from Deezer, so an internet connection is required.</p>' +
       '</section>';
   }
 
@@ -576,7 +641,7 @@
           '<span>' + esc(player.name) + ' plays this one</span></div>' +
         '<div class="score-strip">' + scoreChip(0, state.turn === 0) + scoreChip(1, state.turn === 1) + '</div>' +
         '<button class="btn btn--primary btn--lg" data-action="ready">I’m ready — play my song</button>' +
-        '<p class="fineprint">Your first listen is just a tenth of a second.</p>' +
+        '<p class="fineprint">Your first listen is just a quarter of a second.</p>' +
       '</section>';
   }
 
@@ -595,16 +660,16 @@
           '<div class="record" id="record">' +
             '<div class="record__disc"></div>' +
             '<div class="record__label p' + state.turn + '">' +
-              '<span class="record__time" id="recordTime">0.1s</span>' +
+              '<span class="record__time" id="recordTime">0.25s</span>' +
               '<span class="record__sub">clip</span>' +
             '</div>' +
           '</div>' +
           '<div class="progress" aria-hidden="true"><div class="progress__fill" id="progressFill"></div></div>' +
           '<button class="play-btn" data-action="play" id="playBtn">' +
             '<span class="play-btn__ic">' + ICONS.play + ICONS.pause + '</span>' +
-            '<span id="playLabel">Play 0.1 seconds</span>' +
+            '<span id="playLabel">Play 0.25 seconds</span>' +
           '</button>' +
-          '<ol class="ladder" id="ladder" aria-label="Snippet lengths: 0.1, 0.5, 2 and 15 seconds"></ol>' +
+          '<ol class="ladder" id="ladder" aria-label="Snippet lengths: 0.25, 0.5, 2 and 15 seconds"></ol>' +
           '<button class="skip-btn" type="button" data-action="skip" id="skipBtn">Skip ahead — hear 0.5 seconds</button>' +
         '</div>' +
         '<form id="guessForm" class="guess" autocomplete="off">' +
@@ -678,7 +743,7 @@
     const nextLabel = state.turn === first ? 'Pass to ' + nextName : 'See round results';
 
     const headlines = [
-      'A tenth of a second. That’s all it took.',
+      'A quarter of a second. That’s all it took.',
       'Half a second. Sharp ears.',
       'Two seconds was enough.',
       'Worth the wait.',
@@ -809,7 +874,7 @@
           '<button class="btn btn--primary" data-action="rematch">Rematch — new songs</button>' +
           '<button class="btn" data-action="new-players">Change players</button>' +
         '</div>' +
-        '<p class="fineprint">Clips are official 30-second previews from Apple Music.</p>' +
+        '<p class="fineprint">Clips are the first 30 seconds of each song, streamed from Deezer.</p>' +
       '</section>';
   }
 
